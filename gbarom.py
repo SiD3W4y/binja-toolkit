@@ -1,6 +1,7 @@
 from binaryninja import *
 import struct
 import os
+import re
 
 class GBAView(BinaryView):
     name = "GBA"
@@ -145,6 +146,9 @@ class GBAView(BinaryView):
             log_error(traceback.format_exc())
             return False
 
+# Analysis part
+coverage_mapping = None
+coverage_set = None
 
 def getvals(path):
     lines = open(path, "r").readlines()
@@ -166,6 +170,30 @@ def getvals(path):
     
     return resset, resmap
 
+def load_cov(bv):
+    global coverage_mapping
+    global coverage_set
+
+    path = get_open_filename_input("Select microcov bb dump")
+
+    if not path or not os.path.exists(path):
+        show_message_box("Error", "Could not open cov file", icon=MessageBoxIcon.ErrorIcon)
+        return
+
+    values, valuemap = getvals(path)
+
+    if coverage_mapping and coverage_set:
+        res = show_message_box("Warning", "Coverage data is already present, do you wish to overwrite it ?", MessageBoxButtonSet.YesNoButtonSet)
+
+        if not res:
+            return
+        
+        microcov_clean(bv)
+
+    coverage_mapping = valuemap
+    coverage_set = values
+
+
 highlight_rgb = (0x42, 0xf4, 0x4b)
 highlightval = highlight.HighlightColor(red=highlight_rgb[0],
         green=highlight_rgb[1],
@@ -178,16 +206,15 @@ def get_markdown_entry(fn):
     return "{} - {}\n".format(addr, name)
 
 def microcov_fnlist(bv):
-    path = get_open_filename_input("Select microcov bb dump file")
+    load_cov(bv)
 
-    if not path or not os.path.exists(path):
-        show_message_box("Error", "Could not open cov file", icon=MessageBoxIcon.ErrorIcon)
+    if not coverage_mapping:
+        return
 
-    values, valuemap = getvals(path)
     validbbs = set()
     results = {}
 
-    for v in values:
+    for v in coverage_set:
         fnlist = bv.get_functions_containing(v)
         bblist = bv.get_basic_blocks_at(v)
 
@@ -202,6 +229,8 @@ def microcov_fnlist(bv):
                 # result of a return through bx <reg>
                 if v == curbb.start:
                     validbbs.add(v)
+                    fn.set_comment_at(v, "Hitcount = {}".format(coverage_mapping[v]))
+
                     if fn.start not in results:
                         results[fn.start] = fn, 1
                     else:
@@ -209,8 +238,8 @@ def microcov_fnlist(bv):
                         results[fn.start] = fn, cnt+1
     
     # Function hit report
-    report = "| *Address* | *BB Count* | Function name |\n"
-    report += "|:-----:|:-----:|-----|\n"
+    report = "| **Address** | **BB Count** | **Function name** |\n"
+    report += "|:-----:|:-----:|:-----:|\n"
 
     for start in results:
         fn, bbcount = results[start]
@@ -224,13 +253,13 @@ def microcov_fnlist(bv):
     bv.show_markdown_report("Function coverage", report)
 
     # Block hit report
-    report = "| *Address* | *Hitcount* |\n"
+    report = "| **Address** | **Hitcount** |\n"
     report += "|:-----:|:-----:|\n"
 
     entrylist = []
 
     for addr in validbbs:
-        entrylist.append((addr, valuemap[addr]))
+        entrylist.append((addr, coverage_mapping[addr]))
 
     entrylist = sorted(entrylist, key=lambda a: a[1])
 
@@ -241,15 +270,59 @@ def microcov_fnlist(bv):
     bv.show_markdown_report("BB Hits", report)
 
 def microcov_clean(bv):
-    path = get_open_filename_input("Select microcov bb dump file")
+    global coverage_set
+    global coverage_mapping
 
-    if not path or not os.path.exists(path):
-        show_message_box("Error", "Could not open cov file", icon=MessageBoxIcon.ErrorIcon)
+    if coverage_mapping and coverage_set:
+        for v in coverage_set:
+            bbs = bv.get_basic_blocks_at(v)
 
-    values, _ = getvals(path)
+            if bbs:
+                print("cleaning")
+                block = bbs[0]
+                fn = block.function
+                fn.set_comment_at(block.start, "")
+                block.set_user_highlight(HighlightStandardColor.NoHighlightColor)
+        
+        coverage_mapping = None
+        coverage_set = None
 
-    for v in values:
-        bbs = bv.get_basic_blocks_at(v)
+def microcov_search(bv):
+    global coverage_set
+    global coverage_mapping
 
-        if bbs:
-            bbs[0].set_user_highlight(HighlightStandardColor.NoHighlightColor)
+    if not coverage_set:
+        show_message_box("Error", "Please load a code coverage file", icon=MessageBoxIcon.ErrorIcon)
+        return
+
+    exp = get_text_line_input("Regex", "Instruction search")
+    result = []
+
+
+    if len(exp) == 0:
+        return
+
+    m = re.compile(exp)
+
+    for bbaddr in coverage_set:
+        blocks = bv.get_basic_blocks_at(bbaddr)
+
+        if blocks:
+            block = blocks[0]
+
+            for e in block.get_disassembly_text():
+                if m.match(str(e)):
+                    result.append((e.address, str(e), coverage_mapping[bbaddr]))
+
+    
+    result = sorted(result, key=lambda a: a[2])
+
+    report = "| **Address** | ** Hitcount ** | **Instruction** |\n"
+    report += "|:------------:|:--------|\n"
+
+    for addr, ins, hitcount in result:
+        addr = "[0x{:08x}](binaryninja://?expr=0x{:08x})".format(addr, addr)
+
+        report += "| {} | {} | {} |\n".format(addr, hitcount, ins)
+
+    bv.show_markdown_report("Search results", report)
