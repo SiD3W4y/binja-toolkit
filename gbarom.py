@@ -20,7 +20,7 @@ class GBAView(BinaryView):
         if len(hdr) < 0xc0:
             return False
 
-        magic_byte = struct.unpack("B", hdr[0xb2])[0]
+        magic_byte = hdr[0xb2]
         
         if magic_byte != 0x96:
             return False
